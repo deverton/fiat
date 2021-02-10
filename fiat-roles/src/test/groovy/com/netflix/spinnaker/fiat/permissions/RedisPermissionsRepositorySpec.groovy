@@ -45,6 +45,7 @@ import java.time.ZoneId
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.ForkJoinPool
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReadWriteLock
 import java.util.concurrent.locks.ReentrantReadWriteLock
@@ -69,6 +70,10 @@ class RedisPermissionsRepositorySpec extends Specification {
 
   @Shared
   PausableRedisClientDelegate redisClientDelegate
+
+  @Shared
+  @AutoCleanup("shutdown")
+  ForkJoinPool forkJoinPool = new ForkJoinPool(2)
 
   @Subject
   RedisPermissionsRepository repo
@@ -163,7 +168,8 @@ class RedisPermissionsRepositorySpec extends Specification {
         redisClientDelegate,
         [new Application(), new Account(), new ServiceAccount(), new Role(), new BuildService()],
         configProps,
-        RetryRegistry.ofDefaults()
+        RetryRegistry.ofDefaults(),
+        forkJoinPool
     )
   }
 

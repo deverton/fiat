@@ -11,6 +11,7 @@ import com.netflix.spinnaker.kork.telemetry.InstrumentedProxy;
 import io.github.resilience4j.retry.RetryRegistry;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ForkJoinPool;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -25,10 +26,11 @@ public class PermissionsRepositoryConfig {
       RedisClientDelegate redisClientDelegate,
       List<Resource> resources,
       RedisPermissionRepositoryConfigProps configProps,
-      RetryRegistry retryRegistry) {
+      RetryRegistry retryRegistry,
+      ForkJoinPool forkJoinPool) {
     RedisPermissionsRepository redisPermissionsRepository =
         new RedisPermissionsRepository(
-            objectMapper, redisClientDelegate, resources, configProps, retryRegistry);
+            objectMapper, redisClientDelegate, resources, configProps, retryRegistry, forkJoinPool);
     return InstrumentedProxy.proxy(
         registry,
         redisPermissionsRepository,

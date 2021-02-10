@@ -31,15 +31,19 @@ import com.netflix.spinnaker.fiat.permissions.PermissionsResolver;
 import com.netflix.spinnaker.fiat.providers.ProviderException;
 import com.netflix.spinnaker.fiat.providers.ResourceProvider;
 import com.netflix.spinnaker.kork.discovery.DiscoveryStatusListener;
+import com.netflix.spinnaker.kork.exceptions.IntegrationException;
+import com.netflix.spinnaker.kork.exceptions.SystemException;
 import com.netflix.spinnaker.kork.lock.LockManager;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
@@ -63,6 +67,7 @@ public class UserRolesSyncer {
   private final PermissionsResolver permissionsResolver;
   private final ResourceProvider<ServiceAccount> serviceAccountProvider;
   private final ResourceProvidersHealthIndicator healthIndicator;
+  private final ForkJoinPool forkJoinPool;
 
   private final long retryIntervalMs;
   private final long syncDelayMs;
@@ -81,6 +86,7 @@ public class UserRolesSyncer {
       PermissionsResolver permissionsResolver,
       ResourceProvider<ServiceAccount> serviceAccountProvider,
       ResourceProvidersHealthIndicator healthIndicator,
+      ForkJoinPool forkJoinPool,
       @Value("${fiat.write-mode.retry-interval-ms:10000}") long retryIntervalMs,
       @Value("${fiat.write-mode.sync-delay-ms:600000}") long syncDelayMs,
       @Value("${fiat.write-mode.sync-failure-delay-ms:600000}") long syncFailureDelayMs,
@@ -92,6 +98,7 @@ public class UserRolesSyncer {
     this.permissionsResolver = permissionsResolver;
     this.serviceAccountProvider = serviceAccountProvider;
     this.healthIndicator = healthIndicator;
+    this.forkJoinPool = forkJoinPool;
 
     this.retryIntervalMs = retryIntervalMs;
     this.syncDelayMs = syncDelayMs;
@@ -254,16 +261,31 @@ public class UserRolesSyncer {
       return 0;
     }
 
-    long count =
-        timeIt(
-            "syncUsers",
-            () -> {
-              Collection<UserPermission> values = permissionsResolver.resolve(extUsers).values();
-              values.forEach(permissionsRepository::put);
-              return values.size();
-            });
-    log.info("Synced {} non-anonymous user roles.", count);
-    return count;
+    var count = new AtomicInteger(0);
+    timeIt(
+        "syncUsers",
+        () -> {
+          try {
+            forkJoinPool
+                .submit(
+                    () -> {
+                      permissionsResolver.resolve(extUsers).values().parallelStream()
+                          .forEach(
+                              e -> {
+                                permissionsRepository.put(e);
+                                count.getAndIncrement();
+                              });
+                    })
+                .get();
+          } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new SystemException(ex);
+          } catch (ExecutionException ex) {
+            throw new IntegrationException(ex);
+          }
+        });
+    log.info("Synced {} non-anonymous user roles.", count.get());
+    return count.get();
   }
 
   private static String metricName(String name) {
