@@ -27,18 +27,15 @@ import com.netflix.spinnaker.fiat.model.resources.ResourceType;
 import com.netflix.spinnaker.fiat.model.resources.Role;
 import com.netflix.spinnaker.kork.exceptions.IntegrationException;
 import com.netflix.spinnaker.kork.exceptions.SpinnakerException;
+import com.netflix.spinnaker.kork.exceptions.SystemException;
 import com.netflix.spinnaker.kork.jedis.RedisClientDelegate;
 import io.github.resilience4j.retry.RetryRegistry;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -83,6 +80,7 @@ public class RedisPermissionsRepository implements PermissionsRepository {
   private final List<Resource> resources;
   private final RedisPermissionRepositoryConfigProps configProps;
   private final RetryRegistry retryRegistry;
+  private final ForkJoinPool forkJoinPool;
   private final AtomicReference<String> fallbackLastModified = new AtomicReference<>(null);
 
   private final LoadingCache<String, UserPermission> unrestrictedPermission =
@@ -98,7 +96,8 @@ public class RedisPermissionsRepository implements PermissionsRepository {
       RedisClientDelegate redisClientDelegate,
       List<Resource> resources,
       RedisPermissionRepositoryConfigProps configProps,
-      RetryRegistry retryRegistry) {
+      RetryRegistry retryRegistry,
+      ForkJoinPool forkJoinPool) {
     this.clock = clock;
     this.objectMapper = objectMapper;
     this.redisClientDelegate = redisClientDelegate;
@@ -106,6 +105,11 @@ public class RedisPermissionsRepository implements PermissionsRepository {
     this.prefix = configProps.getPrefix();
     this.resources = resources;
     this.retryRegistry = retryRegistry;
+    this.forkJoinPool = forkJoinPool;
+
+    this.allUsersKey = SafeEncoder.encode(String.format("%s:%s", prefix, KEY_ALL_USERS));
+    this.adminKey =
+        SafeEncoder.encode(String.format("%s:%s:%s", prefix, KEY_PERMISSIONS, KEY_ADMIN));
   }
 
   public RedisPermissionsRepository(
@@ -113,14 +117,16 @@ public class RedisPermissionsRepository implements PermissionsRepository {
       RedisClientDelegate redisClientDelegate,
       List<Resource> resources,
       RedisPermissionRepositoryConfigProps configProps,
-      RetryRegistry retryRegistry) {
+      RetryRegistry retryRegistry,
+      ForkJoinPool forkJoinPool) {
     this(
         Clock.systemUTC(),
         objectMapper,
         redisClientDelegate,
         resources,
         configProps,
-        retryRegistry);
+        retryRegistry,
+        forkJoinPool);
   }
 
   private UserPermission reloadUnrestricted(String cacheKey) {
@@ -325,16 +331,28 @@ public class RedisPermissionsRepository implements PermissionsRepository {
     UserPermission unrestrictedUser = getUserPermission(UNRESTRICTED, rawUnrestricted);
     Set<String> adminSet = getAllAdmins();
 
-    return allUsers.stream()
-        .map(userId -> getRawUserPermissionsFromRedis(userId))
-        .map(
-            rawUser -> {
-              rawUser.isAdmin = adminSet.contains(rawUser.userId);
-              return getUserPermission(rawUser.userId, rawUser);
-            })
-        .collect(
-            Collectors.toMap(
-                UserPermission::getId, permission -> permission.merge(unrestrictedUser)));
+    try {
+      return forkJoinPool
+          .submit(
+              () ->
+                  allUsers.parallelStream()
+                      .map(userId -> getRawUserPermissionsFromRedis(userId))
+                      .map(
+                          rawUser -> {
+                            rawUser.isAdmin = adminSet.contains(rawUser.userId);
+                            return getUserPermission(rawUser.userId, rawUser);
+                          })
+                      .collect(
+                          Collectors.toMap(
+                              UserPermission::getId,
+                              permission -> permission.merge(unrestrictedUser))))
+          .get();
+    } catch (InterruptedException ex) {
+      Thread.currentThread().interrupt();
+      throw new SystemException(ex);
+    } catch (ExecutionException ex) {
+      throw new IntegrationException(ex);
+    }
   }
 
   @Override
@@ -362,16 +380,28 @@ public class RedisPermissionsRepository implements PermissionsRepository {
     UserPermission unrestrictedUser = getUserPermission(UNRESTRICTED, rawUnrestricted);
     Set<String> adminSet = getAllAdmins();
 
-    return dedupedUsernames.stream()
-        .map(userId -> getRawUserPermissionsFromRedis(userId))
-        .map(
-            rawUser -> {
-              rawUser.isAdmin = adminSet.contains(rawUser.userId);
-              return getUserPermission(rawUser.userId, rawUser);
-            })
-        .collect(
-            Collectors.toMap(
-                UserPermission::getId, permission -> permission.merge(unrestrictedUser)));
+    try {
+      return forkJoinPool
+          .submit(
+              () ->
+                  dedupedUsernames.stream()
+                      .map(userId -> getRawUserPermissionsFromRedis(userId))
+                      .map(
+                          rawUser -> {
+                            rawUser.isAdmin = adminSet.contains(rawUser.userId);
+                            return getUserPermission(rawUser.userId, rawUser);
+                          })
+                      .collect(
+                          Collectors.toMap(
+                              UserPermission::getId,
+                              permission -> permission.merge(unrestrictedUser))))
+          .get();
+    } catch (InterruptedException ex) {
+      Thread.currentThread().interrupt();
+      throw new SystemException(ex);
+    } catch (ExecutionException ex) {
+      throw new IntegrationException(ex);
+    }
   }
 
   private UserPermission getUserPermission(String userId, RawUserPermission raw) {

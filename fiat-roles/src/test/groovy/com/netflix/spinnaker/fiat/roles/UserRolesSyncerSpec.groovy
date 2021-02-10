@@ -47,6 +47,7 @@ import spock.lang.Subject
 import spock.lang.Unroll
 
 import java.util.concurrent.Callable
+import java.util.concurrent.ForkJoinPool
 
 class UserRolesSyncerSpec extends Specification {
 
@@ -68,6 +69,10 @@ class UserRolesSyncerSpec extends Specification {
   @Shared
   RedisPermissionsRepository repo
 
+  @Shared
+  @AutoCleanup("shutdown")
+  ForkJoinPool forkJoinPool = new ForkJoinPool(2)
+
   def setupSpec() {
     embeddedRedis = EmbeddedRedis.embed()
     jedis = embeddedRedis.jedis
@@ -80,7 +85,8 @@ class UserRolesSyncerSpec extends Specification {
         new JedisClientDelegate(embeddedRedis.pool as JedisPool),
         [new Application(), new Account(), new ServiceAccount(), new Role(), new BuildService()],
         new RedisPermissionRepositoryConfigProps(prefix: "unittests"),
-        RetryRegistry.ofDefaults()
+        RetryRegistry.ofDefaults(),
+        forkJoinPool
     )
   }
 
@@ -149,6 +155,7 @@ class UserRolesSyncerSpec extends Specification {
         permissionsResolver,
         serviceAccountProvider,
         new AlwaysUpHealthIndicator(),
+        forkJoinPool,
         1,
         1,
         1,
@@ -222,6 +229,7 @@ class UserRolesSyncerSpec extends Specification {
         null,
         null,
         new AlwaysUpHealthIndicator(),
+        forkJoinPool,
         1,
         1,
         1,
